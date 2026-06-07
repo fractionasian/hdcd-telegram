@@ -377,7 +377,9 @@ async fn download_photo_from_message(msg: &Message, ctx: &HandlerContext) -> Opt
             let file_path = file.file_path.as_deref()?;
             match ctx.api.download_file(file_path).await {
                 Ok(bytes) => {
-                    let ext = file_path.split('.').next_back().unwrap_or("jpg");
+                    let raw_ext = file_path.split('.').next_back().unwrap_or("jpg");
+                    let ext: String = raw_ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+                    let ext = if ext.is_empty() { "jpg".to_string() } else { ext };
                     // Sanitize file_unique_id to prevent path traversal.
                     let sanitized_id: String = best
                         .file_unique_id
@@ -803,7 +805,9 @@ async fn download_voice_file(file_id: &str, ctx: &HandlerContext) -> anyhow::Res
         .ok_or_else(|| anyhow::anyhow!("Telegram returned no file_path for voice"))?;
     let bytes = ctx.api.download_file(file_path).await?;
 
-    let ext = file_path.split('.').next_back().unwrap_or("oga");
+    let raw_ext = file_path.split('.').next_back().unwrap_or("oga");
+    let ext: String = raw_ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let ext = if ext.is_empty() { "oga".to_string() } else { ext };
     let id = uuid::Uuid::new_v4();
     let temp_path = std::env::temp_dir().join(format!("hdcd-voice-dl-{id}.{ext}"));
 
