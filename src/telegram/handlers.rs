@@ -9,10 +9,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
 use super::access::{self, Access, ChunkMode, GateResult, ReplyToMode};
@@ -53,6 +54,72 @@ pub struct HandlerContext {
     pub transcribe_support: TranscribeSupport,
     pub transcribe_config: TranscribeConfig,
     pub pending_transcriptions: Mutex<HashMap<(String, String), PendingTranscription>>,
+}
+
+// ---------------------------------------------------------------------------
+// Typing-indicator heartbeat
+// ---------------------------------------------------------------------------
+//
+// Telegram's `typing` chat action only persists for ~5s, but an agent turn can
+// take far longer — leaving the user staring at a silent chat. We keep the
+// indicator alive by refreshing the action on a timer from the moment a message
+// is accepted (`handle_deliver`) until the agent commits to a reply
+// (`stop_typing_heartbeat`, called by the outbound `reply` tool).
+//
+// The registry is a process-global keyed by chat_id because start and stop run
+// on different code paths that share no context: the inbound handler has the
+// `HandlerContext`, the outbound tool handler has only the bot API + state dir.
+// Threading a registry through `handle_tool_call` would churn its signature for
+// no semantic gain — the bot is one process, so a global keyed by chat is exact.
+
+/// Interval between typing-indicator refreshes. The native `typing` action
+/// expires after ~5s; refreshing at 4s keeps it continuous with margin.
+const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(4);
+
+/// Safety backstop: stop refreshing after this many ticks even if no reply is
+/// ever sent, so a silently-stalled agent can't ping Telegram forever.
+/// 150 × 4s = 10 minutes.
+const TYPING_MAX_TICKS: u32 = 150;
+
+/// Active typing heartbeats, keyed by chat_id. See the module note above.
+static TYPING_HEARTBEATS: LazyLock<Mutex<HashMap<String, AbortHandle>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Start a typing-indicator heartbeat for `chat_id`: fire the `typing` action
+/// immediately, then refresh it every [`TYPING_REFRESH_INTERVAL`] until
+/// [`stop_typing_heartbeat`] is called (or [`TYPING_MAX_TICKS`] is reached).
+/// Replacing an existing heartbeat for the same chat aborts the old one.
+pub async fn start_typing_heartbeat(api: Arc<BotApi>, chat_id: String) {
+    // Fire once immediately so the indicator appears without a tick of delay.
+    let _ = api.send_chat_action(&chat_id, "typing").await;
+
+    let task_chat = chat_id.clone();
+    let handle = tokio::spawn(async move {
+        let mut ticks = 0u32;
+        loop {
+            tokio::time::sleep(TYPING_REFRESH_INTERVAL).await;
+            ticks += 1;
+            if ticks > TYPING_MAX_TICKS {
+                break;
+            }
+            // Ignore transient send errors; cancellation is the real stop.
+            let _ = api.send_chat_action(&task_chat, "typing").await;
+        }
+    })
+    .abort_handle();
+
+    if let Some(old) = TYPING_HEARTBEATS.lock().await.insert(chat_id, handle) {
+        old.abort();
+    }
+}
+
+/// Stop the typing-indicator heartbeat for `chat_id`, if one is running.
+/// Called when the agent commits to a reply; Telegram also clears the indicator
+/// the instant the reply lands, so the dots vanish exactly as the answer appears.
+pub async fn stop_typing_heartbeat(chat_id: &str) {
+    if let Some(handle) = TYPING_HEARTBEATS.lock().await.remove(chat_id) {
+        handle.abort();
+    }
 }
 
 /// Permission-reply regex: `yes <5-char-id>` or `no <5-char-id>`.
@@ -180,8 +247,9 @@ async fn handle_deliver(
         return Some(vec![frame]);
     }
 
-    // Typing indicator.
-    let _ = ctx.api.send_chat_action(&chat_id, "typing").await;
+    // Typing indicator — start a heartbeat that keeps the "typing…" status
+    // visible for the whole turn (stopped by the outbound `reply` tool).
+    start_typing_heartbeat(ctx.api.clone(), chat_id.clone()).await;
 
     // Ack reaction.
     if let Some(ref ack) = access.ack_reaction {

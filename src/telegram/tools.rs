@@ -158,6 +158,10 @@ async fn handle_reply(args: &Value, api: &BotApi, state_dir: &Path) -> Result<Va
 
     access::assert_allowed_chat(state_dir, chat_id)?;
 
+    // The agent is committing to a reply — stop the typing-indicator heartbeat
+    // started when the inbound message was accepted.
+    handlers::stop_typing_heartbeat(chat_id).await;
+
     // Validate files.
     for f in &files {
         assert_sendable(f, state_dir)?;
