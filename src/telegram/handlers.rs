@@ -446,8 +446,15 @@ async fn download_photo_from_message(msg: &Message, ctx: &HandlerContext) -> Opt
             match ctx.api.download_file(file_path).await {
                 Ok(bytes) => {
                     let raw_ext = file_path.split('.').next_back().unwrap_or("jpg");
-                    let ext: String = raw_ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-                    let ext = if ext.is_empty() { "jpg".to_string() } else { ext };
+                    let ext: String = raw_ext
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .collect();
+                    let ext = if ext.is_empty() {
+                        "jpg".to_string()
+                    } else {
+                        ext
+                    };
                     // Sanitize file_unique_id to prevent path traversal.
                     let sanitized_id: String = best
                         .file_unique_id
@@ -874,8 +881,15 @@ async fn download_voice_file(file_id: &str, ctx: &HandlerContext) -> anyhow::Res
     let bytes = ctx.api.download_file(file_path).await?;
 
     let raw_ext = file_path.split('.').next_back().unwrap_or("oga");
-    let ext: String = raw_ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    let ext = if ext.is_empty() { "oga".to_string() } else { ext };
+    let ext: String = raw_ext
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let ext = if ext.is_empty() {
+        "oga".to_string()
+    } else {
+        ext
+    };
     let id = uuid::Uuid::new_v4();
     let temp_path = std::env::temp_dir().join(format!("hdcd-voice-dl-{id}.{ext}"));
 
